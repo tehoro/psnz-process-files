@@ -18,19 +18,13 @@ st.set_page_config(page_title="PSNZ Image Entries Processor")
 
 DEBUG = False  # Set to True to enable detailed debug output
 
-def get_id_length(df):
-    ids = df['File Name'].str.extract(r'^(\d+)', expand=False).astype(int)
-    max_id = ids.max()
-    return math.ceil(math.log10(max_id + 1))
-
 def pad_id_with_sequence(filename, id_length, sequence_dict=None):
     match = re.match(r'^(\d+)(.*)$', filename)
     if match:
         id_num, rest = match.groups()
-        padded_id = id_num.zfill(id_length)
 
         if sequence_dict is None:
-            return f"{padded_id}{rest}"
+            return f"{id_num}{rest}"
 
         if id_num not in sequence_dict:
             sequence_dict[id_num] = 1
@@ -40,9 +34,9 @@ def pad_id_with_sequence(filename, id_length, sequence_dict=None):
         name_parts = rest.rsplit('.', 1)
         if len(name_parts) == 2:
             clean_title = name_parts[0].lstrip('- ')
-            return f"{padded_id}-{sequence_num} {clean_title}.{name_parts[1]}"
+            return f"{id_num}-{sequence_num} {clean_title}.{name_parts[1]}"
         clean_rest = rest.lstrip('- ')
-        return f"{padded_id}-{sequence_num} {clean_rest}"
+        return f"{id_num}-{sequence_num} {clean_rest}"
     return filename
 
 def log_memory_usage(message):
@@ -78,7 +72,6 @@ def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=Fal
             st.error(f"Missing required columns: {', '.join(missing_columns)}")
             return None
 
-        id_length = get_id_length(df)
         sequence_dict = {} if add_sequence else None
 
         total_images = len(df)
@@ -86,7 +79,7 @@ def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=Fal
         progress_bar = st.progress(0)
 
         for index, row in df.iterrows():
-            filename = pad_id_with_sequence(row['File Name'], id_length, sequence_dict)
+            filename = pad_id_with_sequence(row['File Name'], None, sequence_dict)
             filepath = os.path.join(fullsize_dir, filename)
             filepath_small = os.path.join(thumbnail_dir, filename)
             try:
