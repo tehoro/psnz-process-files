@@ -79,7 +79,8 @@ def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=Fal
         progress_bar = st.progress(0)
 
         for index, row in df.iterrows():
-            filename = pad_id_with_sequence(row['File Name'], None, sequence_dict)
+            # Replace invalid Windows filename characters with underscore
+            filename = re.sub(r'[\\/:*?"<>|]', '_', pad_id_with_sequence(row['File Name'], None, sequence_dict))
             filepath = os.path.join(fullsize_dir, filename)
             filepath_small = os.path.join(thumbnail_dir, filename)
             try:
