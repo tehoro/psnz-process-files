@@ -1,9 +1,10 @@
 # Created by Neil Gordon January 2025
+# Modified to include EXIF data extraction
 
 import streamlit as st
 import pandas as pd
 import requests
-from PIL import Image
+from PIL import Image, ExifTags
 from io import BytesIO
 import os
 import zipfile
@@ -13,6 +14,8 @@ import re
 import math
 import psutil
 import gc
+import datetime
+import csv
 
 st.set_page_config(page_title="PSNZ Image Entries Processor")
 
@@ -45,6 +48,33 @@ def log_memory_usage(message):
         memory_info = process.memory_info()
         st.write(f"Memory usage at {message}: {memory_info.rss / 1024 / 1024:.2f} MB")
 
+def get_exif_data(img):
+    """Extract EXIF data from image"""
+    exif_data = {
+        'DateTimeCreated': None,
+        'DateTimeOriginal': None,
+        'Width': img.width,
+        'Height': img.height
+    }
+    
+    try:
+        exif = {ExifTags.TAGS.get(tag, tag): value for tag, value in img._getexif().items()} if hasattr(img, '_getexif') and img._getexif() else {}
+        
+        # Date/Time when the image was created/modified
+        if 'DateTime' in exif:
+            exif_data['DateTimeCreated'] = exif['DateTime']
+        
+        # Original Date/Time when the photo was taken
+        if 'DateTimeOriginal' in exif:
+            exif_data['DateTimeOriginal'] = exif['DateTimeOriginal']
+        elif 'DateTimeDigitized' in exif:
+            exif_data['DateTimeOriginal'] = exif['DateTimeDigitized']
+    except Exception as e:
+        if DEBUG:
+            st.write(f"Error extracting EXIF data: {str(e)}")
+    
+    return exif_data
+
 def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=False):
     temp_dir = tempfile.mkdtemp()
 
@@ -59,6 +89,10 @@ def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=Fal
     thumbnail_dir = os.path.join(temp_dir, thumbnail_folder_name)
     os.makedirs(fullsize_dir, exist_ok=True)
     os.makedirs(thumbnail_dir, exist_ok=True)
+
+    # Create exif data CSV file
+    exif_csv_path = os.path.join(temp_dir, "image_metadata.csv")
+    exif_data_list = []
 
     try:
         if DEBUG:
@@ -80,13 +114,28 @@ def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=Fal
 
         for index, row in df.iterrows():
             # Replace invalid Windows filename characters with underscore
-            filename = re.sub(r'[\\/:*?"<>|]', '_', pad_id_with_sequence(row['File Name'], None, sequence_dict))
+            original_filename = row['File Name']
+            filename = re.sub(r'[\\/:*?"<>|]', '_', pad_id_with_sequence(original_filename, None, sequence_dict))
             filepath = os.path.join(fullsize_dir, filename)
             filepath_small = os.path.join(thumbnail_dir, filename)
             try:
                 response = requests.get(row['Image: URL'], timeout=10)
                 img = Image.open(BytesIO(response.content))
                 log_memory_usage(f"after opening {filename}")
+
+                # Get EXIF data before any modifications
+                exif_data = get_exif_data(img)
+                
+                # Add filename and original filename to exif data
+                exif_info = {
+                    'FileName': filename,
+                    'OriginalFileName': original_filename,
+                    'Width': exif_data['Width'],
+                    'Height': exif_data['Height'],
+                    'DateTimeCreated': exif_data['DateTimeCreated'],
+                    'DateTimeOriginal': exif_data['DateTimeOriginal']
+                }
+                exif_data_list.append(exif_info)
 
                 if img.mode in ('RGBA', 'P'):
                     img = img.convert('RGB')
@@ -124,6 +173,14 @@ def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=Fal
                     import traceback
                     st.error(f"Traceback: {traceback.format_exc()}")
 
+        # Write EXIF data to CSV
+        with open(exif_csv_path, 'w', newline='') as csvfile:
+            fieldnames = ['FileName', 'OriginalFileName', 'Width', 'Height', 'DateTimeCreated', 'DateTimeOriginal']
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for data in exif_data_list:
+                writer.writerow(data)
+
     except Exception as e:
         st.error(f"Error processing CSV file: {str(e)}")
         if DEBUG:
@@ -156,7 +213,9 @@ def main():
     st.write(
         "Please upload the CSV file with columns 'File Name' and 'Image: URL'. "
         "All images will be fetched and padded with leading zeros. "
-        "We'll create thumbnails and provide a zip for download."
+        "We'll create thumbnails and provide a zip for download. "
+        "EXIF data (dimensions, creation date, original capture date) will be extracted "
+        "and included in a separate CSV file in the zip."
     )
 
     limit_size = st.checkbox("Limit image size to 3840x2160 pixels", value=True)
@@ -178,7 +237,7 @@ def main():
 
                     zip_filename = os.path.basename(zip_path)
                     st.download_button(
-                        label="Download Processed Images (Full-size and Thumbnails)",
+                        label="Download Processed Images (Full-size, Thumbnails, and EXIF Data CSV)",
                         data=zip_bytes,
                         file_name=zip_filename,
                         mime="application/zip"
