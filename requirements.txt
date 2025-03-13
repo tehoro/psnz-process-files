@@ -3,3 +3,4 @@ pandas
 psutil
 requests
 pillow
+typing-extensions
