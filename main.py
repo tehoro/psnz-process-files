@@ -1,6 +1,7 @@
 # Created by Neil Gordon January 2025
 # Modified to include EXIF data extraction
 # Refactored March 2025
+# Fix problem with very large images
 
 import streamlit as st
 import pandas as pd
@@ -17,6 +18,14 @@ import psutil
 import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+import warnings
+
+# Disable PIL DecompressionBombWarning
+# This is safe in our context since we're processing trusted images
+warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
+
+# Set a higher decompression bomb limit if needed
+Image.MAX_IMAGE_PIXELS = None  # Remove the limit entirely, use with caution
 
 # App configuration
 APP_CONFIG = {
