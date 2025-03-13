@@ -33,7 +33,7 @@ APP_CONFIG = {
     "thumbnail_size": (810, 810),
     "fullsize_limit": (3840, 2160),
     "absolute_max_size": 7680,  # Maximum dimension for any image, regardless of settings
-    "jpeg_quality": 95,  # Reduced from 100 to save memory
+    "jpeg_quality": 100,  # Could reduce from 100 to save memory
     "page_title": "PSNZ Image Entries Processor",
     "batch_size": 10,    # Process images in batches to reduce memory usage
     "memory_threshold": 0.8  # Trigger garbage collection when memory usage exceeds 80%
@@ -41,6 +41,39 @@ APP_CONFIG = {
 
 # Setup page configuration
 st.set_page_config(page_title=APP_CONFIG["page_title"], layout="wide")
+
+# Create a resource usage limiter for Streamlit
+@st.cache_resource
+def get_resource_limiter():
+    """Create a semaphore to limit concurrent resource-intensive operations"""
+    import threading
+    return threading.Semaphore(1)
+
+# Add this to the main function before processing:
+    # Get resource limiter
+    resource_limiter = get_resource_limiter()
+    
+    if uploaded_file is not None:
+        st.write("CSV file uploaded. Click 'Process Images' to begin.")
+        if st.button("Process Images"):
+            # Try to acquire the resource lock to prevent multiple concurrent processes
+            if not resource_limiter.acquire(blocking=False):
+                st.error("Another process is already running. Please wait for it to complete.")
+                return
+            
+            try:
+                with st.spinner("Processing images..."):
+                    # Log initial memory usage
+                    log_memory_usage("before processing")
+                    
+                    # Process images
+                    temp_dir = process_images(uploaded_file, limit_size, remove_exif, add_sequence)
+                    
+                    # Continue with zip creation and download...
+                    # (rest of the code)
+            finally:
+                # Release the resource lock
+                resource_limiter.release()
 
 def log_memory_usage(message: str) -> float:
     """Log current memory usage if debug is enabled and return usage percentage."""
@@ -440,6 +473,7 @@ def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=Fal
 def create_zip(directory: Path, csv_filename: str) -> Tuple[str, bytes]:
     """
     Create a zip file with all processed files and return its content as bytes.
+    Uses chunking to handle large file sets without excessive memory usage.
     
     Args:
         directory: Directory containing files to zip
@@ -451,42 +485,75 @@ def create_zip(directory: Path, csv_filename: str) -> Tuple[str, bytes]:
     # Create a zip filename based on the input CSV
     zip_filename = f"{Path(csv_filename).stem}_images.zip"
     
-    # Use BytesIO to create the zip in memory instead of writing to disk
-    zip_buffer = BytesIO()
+    # Create a temporary file for the zip instead of using memory
+    temp_zip_path = Path(tempfile.gettempdir()) / f"temp_{int(time.time())}_{zip_filename}"
     
     status_message = st.empty()
     status_message.write("Creating zip file...")
     
+    # Count total files for progress reporting
     total_files = 0
     for _, _, files in os.walk(directory):
         total_files += len(files)
     
-    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
-        file_count = 0
-        for root, _, files in os.walk(directory):
-            root_path = Path(root)
-            for file in files:
-                file_path = root_path / file
-                arcname = str(file_path.relative_to(directory))
-                zipf.write(file_path, arcname)
+    try:
+        # Create the zip file on disk first
+        with zipfile.ZipFile(temp_zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+            file_count = 0
+            for root, _, files in os.walk(directory):
+                root_path = Path(root)
+                for file in files:
+                    file_path = root_path / file
+                    arcname = str(file_path.relative_to(directory))
+                    zipf.write(file_path, arcname)
+                    
+                    file_count += 1
+                    if file_count % 10 == 0:
+                        status_message.write(f"Adding files to zip: {file_count}/{total_files}")
+                        # Check memory and collect garbage if needed
+                        if log_memory_usage("during zip creation") > APP_CONFIG["memory_threshold"]:
+                            force_garbage_collection()
+        
+        status_message.write(f"Zip file created successfully! Reading zip file in chunks...")
+        
+        # Now read the file in chunks to avoid memory issues
+        chunk_size = 1024 * 1024  # 1MB chunks
+        file_size = temp_zip_path.stat().st_size
+        chunks = []
+        bytes_read = 0
+        
+        with open(temp_zip_path, 'rb') as f:
+            while True:
+                chunk = f.read(chunk_size)
+                if not chunk:
+                    break
+                    
+                chunks.append(chunk)
+                bytes_read += len(chunk)
                 
-                file_count += 1
-                if file_count % 10 == 0:
-                    status_message.write(f"Adding files to zip: {file_count}/{total_files}")
-                    # Check memory and collect garbage if needed
-                    if log_memory_usage("during zip creation") > APP_CONFIG["memory_threshold"]:
-                        force_garbage_collection()
-    
-    status_message.write("Zip file created successfully!")
-    
-    # Reset buffer position to the beginning
-    zip_buffer.seek(0)
-    
-    # Final memory cleanup
-    force_garbage_collection()
-    
-    # Return filename and content as bytes
-    return zip_filename, zip_buffer.getvalue()
+                # Update status occasionally
+                if len(chunks) % 10 == 0:
+                    status_message.write(f"Reading zip file: {bytes_read / file_size:.1%} complete")
+                    force_garbage_collection()
+        
+        # Combine chunks
+        status_message.write("Preparing zip file for download...")
+        zip_bytes = b''.join(chunks)
+        
+        # Clean up temp file
+        temp_zip_path.unlink()
+        
+        # Final memory cleanup
+        force_garbage_collection()
+        status_message.write("Zip file ready for download!")
+        
+        return zip_filename, zip_bytes
+        
+    except Exception as e:
+        # Make sure we clean up the temp file if there's an error
+        if temp_zip_path.exists():
+            temp_zip_path.unlink()
+        raise e
 
 def main() -> None:
     """Main application function."""
@@ -565,7 +632,54 @@ def main() -> None:
                             import traceback
                             st.error(f"Traceback: {traceback.format_exc()}")
                 else:
-                    st.error("Failed to process images. Please check the CSV file format.")
+                    st.error("Failed to process images. Please check the CSV file format.")# Replace the download section in main() with this:
 
+                if temp_dir:
+                    try:
+                        # Show a message about downloading process
+                        download_note = st.info(
+                            "Please wait while we prepare your download. " +
+                            "This may take a few minutes for large batches of images. " +
+                            "Do not close this page."
+                        )
+                        
+                        # Create zip file in memory
+                        zip_filename, zip_bytes = create_zip(temp_dir, uploaded_file.name)
+                        
+                        # Clean up the temp directory
+                        shutil.rmtree(temp_dir)
+                        force_garbage_collection()
+
+                        # Provide download button
+                        download_note.success("Processing complete! Click the button below to download your files:")
+                        
+                        # Split the download into chunks if it's very large (over 200MB)
+                        zip_size_mb = len(zip_bytes) / (1024 * 1024)
+                        if zip_size_mb > 200:
+                            st.warning(
+                                f"The generated zip file is quite large ({zip_size_mb:.1f} MB). " +
+                                "If you encounter issues downloading it, try processing fewer images at once."
+                            )
+                        
+                        # Use the download button
+                        st.download_button(
+                            label=f"Download Processed Images ({zip_size_mb:.1f} MB)",
+                            data=zip_bytes,
+                            file_name=zip_filename,
+                            mime="application/zip"
+                        )
+                        
+                        # Force garbage collection again
+                        del zip_bytes
+                        force_garbage_collection()
+                        
+                    except Exception as e:
+                        st.error(f"Error creating zip file: {str(e)}")
+                        if APP_CONFIG["debug"]:
+                            import traceback
+                            st.error(f"Traceback: {traceback.format_exc()}")
+                else:
+                    st.error("Failed to process images. Please check the CSV file format.")
+                    
 if __name__ == "__main__":
     main()
