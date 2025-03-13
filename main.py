@@ -3,6 +3,7 @@
 # Refactored March 2025
 # Fix problem with very large images
 
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -19,9 +20,9 @@ import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import warnings
+import time
 
 # Disable PIL DecompressionBombWarning
-# This is safe in our context since we're processing trusted images
 warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
 
 # Set a higher decompression bomb limit if needed
@@ -29,22 +30,36 @@ Image.MAX_IMAGE_PIXELS = None  # Remove the limit entirely, use with caution
 
 # App configuration
 APP_CONFIG = {
-    "debug": False,
+    "debug": True,
     "thumbnail_size": (810, 810),
     "fullsize_limit": (3840, 2160),
-    "jpeg_quality": 100,
-    "page_title": "PSNZ Image Entries Processor"
+    "absolute_max_size": 7680,  # Maximum dimension for any image, regardless of settings
+    "jpeg_quality": 100,  # Full quality
+    "page_title": "PSNZ Image Entries Processor",
+    "batch_size": 10,    # Process images in batches to reduce memory usage
+    "memory_threshold": 0.8  # Trigger garbage collection when memory usage exceeds 80%
 }
 
 # Setup page configuration
-st.set_page_config(page_title=APP_CONFIG["page_title"])
+st.set_page_config(page_title=APP_CONFIG["page_title"], layout="wide")
 
-def log_memory_usage(message: str) -> None:
-    """Log current memory usage if debug is enabled."""
+def log_memory_usage(message: str) -> float:
+    """Log current memory usage if debug is enabled and return usage percentage."""
+    process = psutil.Process()
+    memory_info = process.memory_info()
+    memory_percent = memory_info.rss / psutil.virtual_memory().total
+    
     if APP_CONFIG["debug"]:
-        process = psutil.Process()
-        memory_info = process.memory_info()
-        st.write(f"Memory usage at {message}: {memory_info.rss / 1024 / 1024:.2f} MB")
+        st.write(f"Memory usage at {message}: {memory_info.rss / 1024 / 1024:.2f} MB ({memory_percent:.2%})")
+    
+    return memory_percent
+
+def force_garbage_collection():
+    """Force garbage collection and wait for it to complete."""
+    collected = gc.collect(generation=2)  # Full collection
+    if APP_CONFIG["debug"]:
+        st.write(f"Garbage collection: collected {collected} objects")
+    time.sleep(0.1)  # Give the system a moment to actually free memory
 
 def pad_id_with_sequence(filename: str, id_length: Optional[int] = None, 
                          sequence_dict: Optional[Dict[str, int]] = None) -> str:
@@ -98,18 +113,18 @@ def get_exif_data(img: Image.Image) -> Dict[str, Any]:
     
     try:
         # Get EXIF data if available
-        exif = {ExifTags.TAGS.get(tag, tag): value 
-                for tag, value in img._getexif().items()} if hasattr(img, '_getexif') and img._getexif() else {}
-        
-        # Date/Time when the image was created/modified
-        if 'DateTime' in exif:
-            exif_data['DateTimeCreated'] = exif['DateTime']
-        
-        # Original Date/Time when the photo was taken
-        if 'DateTimeOriginal' in exif:
-            exif_data['DateTimeOriginal'] = exif['DateTimeOriginal']
-        elif 'DateTimeDigitized' in exif:
-            exif_data['DateTimeOriginal'] = exif['DateTimeDigitized']
+        if hasattr(img, '_getexif') and img._getexif():
+            exif = {ExifTags.TAGS.get(tag, tag): value for tag, value in img._getexif().items()}
+            
+            # Date/Time when the image was created/modified
+            if 'DateTime' in exif:
+                exif_data['DateTimeCreated'] = exif['DateTime']
+            
+            # Original Date/Time when the photo was taken
+            if 'DateTimeOriginal' in exif:
+                exif_data['DateTimeOriginal'] = exif['DateTimeOriginal']
+            elif 'DateTimeDigitized' in exif:
+                exif_data['DateTimeOriginal'] = exif['DateTimeDigitized']
     except Exception as e:
         if APP_CONFIG["debug"]:
             st.write(f"Error extracting EXIF data: {str(e)}")
@@ -200,13 +215,19 @@ def fetch_and_process_image(
     filepath_small = thumbnail_dir / filename
     
     try:
-        # Fetch the image
-        response = requests.get(row['Image: URL'], timeout=10)
+        # Fetch the image with a longer timeout for large images
+        response = requests.get(row['Image: URL'], timeout=30)
         
-        # Use context manager for better resource management
-        with Image.open(BytesIO(response.content)) as img:
-            log_memory_usage(f"after opening {filename}")
-
+        # Check if response is valid
+        if response.status_code != 200:
+            st.error(f"Failed to download image (HTTP {response.status_code}): {filename}")
+            return None
+            
+        # Load image content
+        image_data = BytesIO(response.content)
+        
+        # Open image and process
+        with Image.open(image_data) as img:
             # Get EXIF data before any modifications
             exif_data = get_exif_data(img)
             
@@ -220,18 +241,36 @@ def fetch_and_process_image(
                 'DateTimeOriginal': exif_data['DateTimeOriginal']
             }
 
-            # Convert to RGB if needed
-            if img.mode in ('RGBA', 'P'):
-                img = img.convert('RGB')
-
-            # Record original size and resize if needed
+            # Record original size
             original_size = f"{img.width}x{img.height}"
             resized = False
             
-            # Create a copy for processing
-            processed_img = img.copy()
+            # Create a modified copy for processing
+            if img.mode in ('RGBA', 'P'):
+                processed_img = img.convert('RGB')
+            else:
+                processed_img = img.copy()
             
-            if limit_size and (processed_img.width > APP_CONFIG["fullsize_limit"][0] or 
+            # First check against absolute maximum size
+            if processed_img.width > APP_CONFIG["absolute_max_size"] or processed_img.height > APP_CONFIG["absolute_max_size"]:
+                # Calculate aspect ratio
+                aspect_ratio = processed_img.width / processed_img.height
+                
+                if processed_img.width > processed_img.height:
+                    new_width = APP_CONFIG["absolute_max_size"]
+                    new_height = int(new_width / aspect_ratio)
+                else:
+                    new_height = APP_CONFIG["absolute_max_size"]
+                    new_width = int(new_height * aspect_ratio)
+                
+                processed_img = processed_img.resize((new_width, new_height), Image.LANCZOS)
+                resized = True
+                
+                if APP_CONFIG["debug"]:
+                    st.write(f"Image {filename} exceeded maximum allowed dimension, resized to {new_width}x{new_height}")
+            
+            # Then check against the normal fullsize limit if that option is selected
+            elif limit_size and (processed_img.width > APP_CONFIG["fullsize_limit"][0] or 
                               processed_img.height > APP_CONFIG["fullsize_limit"][1]):
                 processed_img.thumbnail(APP_CONFIG["fullsize_limit"])
                 resized = True
@@ -241,7 +280,6 @@ def fetch_and_process_image(
                 new_img = Image.new('RGB', processed_img.size)
                 new_img.paste(processed_img)
                 processed_img = new_img
-                log_memory_usage(f"after EXIF removal for {filename}")
 
             # Save full-size image
             processed_img.save(filepath, "JPEG", quality=APP_CONFIG["jpeg_quality"])
@@ -251,16 +289,23 @@ def fetch_and_process_image(
             thumbnail.thumbnail(APP_CONFIG["thumbnail_size"])
             thumbnail.save(filepath_small, "JPEG")
 
-            # Clean up
+            # Clean up to reduce memory usage
             del thumbnail
             del processed_img
+        
+        # Force cleanup of image data
+        del image_data
+        del response
+        
+        # Memory check and garbage collection if needed
+        if log_memory_usage(f"after processing {filename}") > APP_CONFIG["memory_threshold"]:
+            force_garbage_collection()
             
-            # Return status information
-            return {
-                'exif_info': exif_info,
-                'status': "resized" if resized else "original size",
-                'original_size': original_size
-            }
+        return {
+            'exif_info': exif_info,
+            'status': "resized" if resized else "original size",
+            'original_size': original_size
+        }
 
     except Exception as e:
         st.error(f"Error processing image for file {filename}: {str(e)}")
@@ -268,10 +313,6 @@ def fetch_and_process_image(
             import traceback
             st.error(f"Traceback: {traceback.format_exc()}")
         return None
-    finally:
-        # Force garbage collection
-        gc.collect()
-        log_memory_usage(f"after cleanup for {filename}")
 
 def write_exif_data(exif_csv_path: Path, exif_data_list: List[Dict[str, Any]]) -> None:
     """
@@ -333,23 +374,60 @@ def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=Fal
         total_images = len(df)
         st.write(f"Total images to process: {total_images}")
         progress_bar = st.progress(0)
+        status_container = st.empty()
 
-        # Process each image
-        for index, row in df.iterrows():
-            result = fetch_and_process_image(
-                row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict
-            )
-            
-            if result:
-                exif_data_list.append(result['exif_info'])
-                st.write(f"Processed {index + 1}/{total_images}: {result['exif_info']['FileName']} "
-                         f"({result['original_size']}, {result['status']})")
-            
-            # Update progress
-            progress_bar.progress((index + 1) / total_images)
+        # Create a container for status messages to avoid filling the screen
+        with st.expander("Processing Details", expanded=True):
+            status_area = st.empty()
+            status_messages = []
 
+        # Process each image in batches to manage memory
+        batch_size = min(APP_CONFIG["batch_size"], total_images)
+        
+        for start_idx in range(0, total_images, batch_size):
+            end_idx = min(start_idx + batch_size, total_images)
+            batch_df = df.iloc[start_idx:end_idx]
+            
+            # Status update for batch
+            status_container.write(f"Processing images {start_idx+1} to {end_idx} of {total_images}...")
+            
+            # Process each image in the batch
+            for idx, (_, row) in enumerate(batch_df.iterrows()):
+                current_idx = start_idx + idx
+                
+                # Process the image
+                result = fetch_and_process_image(
+                    row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict
+                )
+                
+                if result:
+                    exif_data_list.append(result['exif_info'])
+                    status_message = f"Processed {current_idx + 1}/{total_images}: {result['exif_info']['FileName']} " \
+                                    f"({result['original_size']}, {result['status']})"
+                else:
+                    status_message = f"Failed to process image {current_idx + 1}/{total_images}"
+                
+                # Update status list and display
+                status_messages.append(status_message)
+                if len(status_messages) > 10:  # Keep only the 10 most recent messages
+                    status_messages = status_messages[-10:]
+                status_area.text("\n".join(status_messages))
+                
+                # Update progress
+                progress_bar.progress((current_idx + 1) / total_images)
+            
+            # Force garbage collection between batches
+            force_garbage_collection()
+        
+        # Final status update
+        status_container.write(f"Completed processing {total_images} images. Writing metadata...")
+        
         # Write EXIF data to CSV
         write_exif_data(exif_csv_path, exif_data_list)
+        
+        # Final cleanup
+        force_garbage_collection()
+        status_container.write(f"Processing complete. Preparing download...")
 
     except Exception as e:
         st.error(f"Error processing CSV file: {str(e)}")
@@ -377,33 +455,43 @@ def create_zip(directory: Path, csv_filename: str) -> Tuple[str, bytes]:
     # Use BytesIO to create the zip in memory instead of writing to disk
     zip_buffer = BytesIO()
     
+    status_message = st.empty()
+    status_message.write("Creating zip file...")
+    
+    total_files = 0
+    for _, _, files in os.walk(directory):
+        total_files += len(files)
+    
     with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        file_count = 0
         for root, _, files in os.walk(directory):
             root_path = Path(root)
             for file in files:
                 file_path = root_path / file
                 arcname = str(file_path.relative_to(directory))
                 zipf.write(file_path, arcname)
+                
+                file_count += 1
+                if file_count % 10 == 0:
+                    status_message.write(f"Adding files to zip: {file_count}/{total_files}")
+                    # Check memory and collect garbage if needed
+                    if log_memory_usage("during zip creation") > APP_CONFIG["memory_threshold"]:
+                        force_garbage_collection()
+    
+    status_message.write("Zip file created successfully!")
     
     # Reset buffer position to the beginning
     zip_buffer.seek(0)
     
+    # Final memory cleanup
+    force_garbage_collection()
+    
     # Return filename and content as bytes
     return zip_filename, zip_buffer.getvalue()
-
-# This function is no longer needed since we're not saving zip files to disk
-# def cleanup_old_zips() -> None:
-#     """Remove previous zip files from temp directory."""
-#     temp_dir = Path(tempfile.gettempdir())
-#     for file in temp_dir.glob('*_images.zip'):
-#         file.unlink()
 
 def main() -> None:
     """Main application function."""
     st.title(APP_CONFIG["page_title"])
-
-    # We no longer need to clean up zip files since we're not saving them to disk
-    # cleanup_old_zips()
 
     st.header("CSV File Upload")
     st.write(
@@ -414,35 +502,37 @@ def main() -> None:
         "and included in a separate CSV file in the zip."
     )
 
+    # Option to enable debug mode
+    debug_mode = st.sidebar.checkbox("Enable debug mode", value=False)
+    APP_CONFIG["debug"] = debug_mode
+
     # User options
-    limit_size = st.checkbox("Limit image size to 3840x2160 pixels", value=True)
-    remove_exif = st.checkbox("Remove EXIF metadata from images", value=True)
-    add_sequence = st.checkbox("Add sequence # after ID for multiple images from the same ID", value=False)
+    col1, col2 = st.columns(2)
+    with col1:
+        limit_size = st.checkbox("Limit image size to 3840x2160 pixels", value=True)
+        remove_exif = st.checkbox("Remove EXIF metadata from images", value=True)
+    with col2:
+        add_sequence = st.checkbox("Add sequence # after ID for multiple images from the same ID", value=False)
+        jpeg_quality = st.slider("JPEG Quality", min_value=70, max_value=100, value=95, 
+                                help="Lower quality saves memory but reduces image quality")
+        APP_CONFIG["jpeg_quality"] = jpeg_quality
+
+    # Advanced settings in sidebar
+    st.sidebar.header("Advanced Settings")
+    APP_CONFIG["batch_size"] = st.sidebar.slider("Batch Size", min_value=1, max_value=30, value=10, 
+                                              help="Number of images to process at once")
+    memory_threshold = st.sidebar.slider("Memory Threshold (%)", min_value=50, max_value=95, value=80, 
+                                      help="Trigger garbage collection when memory usage exceeds this percentage")
+    APP_CONFIG["memory_threshold"] = memory_threshold / 100.0
+    
+    # Maximum size setting
+    max_size = st.sidebar.slider("Absolute Maximum Size (pixels)", min_value=4000, max_value=12000, value=7680, 
+                               help="Maximum dimension for any image, regardless of other settings")
+    APP_CONFIG["absolute_max_size"] = max_size
 
     # File uploader
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
     
     if uploaded_file is not None:
+        st.write("CSV file uploaded. Click 'Process Images' to begin.")
         if st.button("Process Images"):
-            with st.spinner("Processing images..."):
-                temp_dir = process_images(uploaded_file, limit_size, remove_exif, add_sequence)
-                
-                if temp_dir:
-                    # Create zip file in memory
-                    zip_filename, zip_bytes = create_zip(temp_dir, uploaded_file.name)
-                    
-                    # Clean up the temp directory
-                    shutil.rmtree(temp_dir)
-
-                    # Provide download button
-                    st.download_button(
-                        label="Download Processed Images (Full-size, Thumbnails, and EXIF Data CSV)",
-                        data=zip_bytes,
-                        file_name=zip_filename,
-                        mime="application/zip"
-                    )
-                else:
-                    st.error("Failed to process images. Please check the CSV file format.")
-
-if __name__ == "__main__":
-    main()
