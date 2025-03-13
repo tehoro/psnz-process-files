@@ -533,6 +533,41 @@ def main() -> None:
     # File uploader
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
     
-    if uploaded_file is not None:
+     if uploaded_file is not None:
         st.write("CSV file uploaded. Click 'Process Images' to begin.")
         if st.button("Process Images"):
+            with st.spinner("Processing images..."):
+                # Log initial memory usage
+                log_memory_usage("before processing")
+                
+                # Process images
+                temp_dir = process_images(uploaded_file, limit_size, remove_exif, add_sequence)
+                
+                if temp_dir:
+                    try:
+                        # Create zip file in memory
+                        zip_filename, zip_bytes = create_zip(temp_dir, uploaded_file.name)
+                        
+                        # Clean up the temp directory
+                        shutil.rmtree(temp_dir)
+                        force_garbage_collection()
+
+                        # Provide download button
+                        st.success("Processing complete! Click the button below to download your files:")
+                        st.download_button(
+                            label="Download Processed Images (Full-size, Thumbnails, and EXIF Data CSV)",
+                            data=zip_bytes,
+                            file_name=zip_filename,
+                            mime="application/zip"
+                        )
+                    except Exception as e:
+                        st.error(f"Error creating zip file: {str(e)}")
+                        if APP_CONFIG["debug"]:
+                            import traceback
+                            st.error(f"Traceback: {traceback.format_exc()}")
+                else:
+                    st.error("Failed to process images. Please check the CSV file format.")
+
+if __name__ == "__main__":
+    main()
+Last edited 8 minutes ag
