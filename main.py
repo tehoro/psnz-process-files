@@ -3,7 +3,6 @@
 # Refactored March 2025
 # Fix problem with very large images
 
-
 import streamlit as st
 import pandas as pd
 import requests
@@ -30,11 +29,11 @@ Image.MAX_IMAGE_PIXELS = None  # Remove the limit entirely, use with caution
 
 # App configuration
 APP_CONFIG = {
-    "debug": True,
+    "debug": False,
     "thumbnail_size": (810, 810),
     "fullsize_limit": (3840, 2160),
     "absolute_max_size": 7680,  # Maximum dimension for any image, regardless of settings
-    "jpeg_quality": 100,  # Full quality
+    "jpeg_quality": 95,  # Reduced from 100 to save memory
     "page_title": "PSNZ Image Entries Processor",
     "batch_size": 10,    # Process images in batches to reduce memory usage
     "memory_threshold": 0.8  # Trigger garbage collection when memory usage exceeds 80%
@@ -533,7 +532,7 @@ def main() -> None:
     # File uploader
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
     
-     if uploaded_file is not None:
+    if uploaded_file is not None:
         st.write("CSV file uploaded. Click 'Process Images' to begin.")
         if st.button("Process Images"):
             with st.spinner("Processing images..."):
@@ -570,4 +569,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-Last edited 8 minutes ag
