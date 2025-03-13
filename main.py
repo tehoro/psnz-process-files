@@ -351,42 +351,50 @@ def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=Fal
 
     return temp_dir
 
-def create_zip(directory: Path, csv_filename: str) -> Path:
+def create_zip(directory: Path, csv_filename: str) -> Tuple[str, bytes]:
     """
-    Create a zip file with all processed files.
+    Create a zip file with all processed files and return its content as bytes.
     
     Args:
         directory: Directory containing files to zip
         csv_filename: Original CSV filename
         
     Returns:
-        Path to created zip file
+        Tuple of (zip_filename, zip_content_bytes)
     """
+    # Create a zip filename based on the input CSV
     zip_filename = f"{Path(csv_filename).stem}_images.zip"
-    zip_path = Path(tempfile.gettempdir()) / zip_filename
     
-    with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+    # Use BytesIO to create the zip in memory instead of writing to disk
+    zip_buffer = BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
         for root, _, files in os.walk(directory):
             root_path = Path(root)
             for file in files:
                 file_path = root_path / file
-                arcname = file_path.relative_to(directory)
+                arcname = str(file_path.relative_to(directory))
                 zipf.write(file_path, arcname)
-                
-    return zip_path
+    
+    # Reset buffer position to the beginning
+    zip_buffer.seek(0)
+    
+    # Return filename and content as bytes
+    return zip_filename, zip_buffer.getvalue()
 
-def cleanup_old_zips() -> None:
-    """Remove previous zip files from temp directory."""
-    temp_dir = Path(tempfile.gettempdir())
-    for file in temp_dir.glob('*_images.zip'):
-        file.unlink()
+# This function is no longer needed since we're not saving zip files to disk
+# def cleanup_old_zips() -> None:
+#     """Remove previous zip files from temp directory."""
+#     temp_dir = Path(tempfile.gettempdir())
+#     for file in temp_dir.glob('*_images.zip'):
+#         file.unlink()
 
 def main() -> None:
     """Main application function."""
     st.title(APP_CONFIG["page_title"])
 
-    # Clean up previous zip files
-    cleanup_old_zips()
+    # We no longer need to clean up zip files since we're not saving them to disk
+    # cleanup_old_zips()
 
     st.header("CSV File Upload")
     st.write(
@@ -411,18 +419,13 @@ def main() -> None:
                 temp_dir = process_images(uploaded_file, limit_size, remove_exif, add_sequence)
                 
                 if temp_dir:
-                    # Create zip file
-                    zip_path = create_zip(temp_dir, uploaded_file.name)
+                    # Create zip file in memory
+                    zip_filename, zip_bytes = create_zip(temp_dir, uploaded_file.name)
                     
                     # Clean up the temp directory
                     shutil.rmtree(temp_dir)
 
-                    # Read the final zip file into memory
-                    with open(zip_path, "rb") as f:
-                        zip_bytes = f.read()
-
                     # Provide download button
-                    zip_filename = zip_path.name
                     st.download_button(
                         label="Download Processed Images (Full-size, Thumbnails, and EXIF Data CSV)",
                         data=zip_bytes,
