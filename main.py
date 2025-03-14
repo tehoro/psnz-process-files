@@ -584,25 +584,25 @@ def process_single_batch(batch_index, df, csv_filename, limit_size, remove_exif,
         
         # Force garbage collection on error
         gc.collect()
-        return None + i + 1
-            status_area.info(f"Processing image {current_image_idx}/{total_images} in batch {batch_index + 1}")
+
+        status_area.info(f"Processing image {current_image_idx}/{total_images} in batch {batch_index + 1}")
             
-            result = fetch_and_process_image(
+        result = fetch_and_process_image(
                 row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict
-            )
+        )
             
-            if result:
-                batch_exif_data.append(result['exif_info'])
-                status_messages.write(f"Processed {current_image_idx}/{total_images}: {result['exif_info']['FileName']} "
-                        f"({result['original_size']}, {result['status']})")
+        if result:
+            batch_exif_data.append(result['exif_info'])
+            status_messages.write(f"Processed {current_image_idx}/{total_images}: {result['exif_info']['FileName']} "
+                       f"({result['original_size']}, {result['status']})")
             
-            # Update progress
-            progress_bar.progress((i + 1) / len(batch_df))
+        # Update progress
+        progress_bar.progress((i + 1) / len(batch_df))
             
-            # Periodically force garbage collection for large batches
-            if i > 0 and i % 25 == 0:
-                gc.collect()
-                log_memory_usage(f"after {i} images in batch {batch_index + 1}")
+        # Periodically force garbage collection for large batches
+        if i > 0 and i % 25 == 0:
+            gc.collect()
+            log_memory_usage(f"after {i} images in batch {batch_index + 1}")
 
         status_area.info(f"Writing EXIF data to CSV for batch {batch_index + 1}")
         # Write EXIF data to CSV for this batch
