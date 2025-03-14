@@ -452,7 +452,7 @@ def main() -> None:
         st.write("")
         if st.button("Reset to Default"):
             batch_size = APP_CONFIG["batch_size"]
-            st.experimental_rerun()
+            st.rerun()
 
     # File uploader
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
@@ -512,7 +512,7 @@ def main() -> None:
                 if st.button("Reset Processing"):
                     st.session_state.batch_results = []
                     st.session_state.processing_complete = False
-                    st.experimental_rerun()
+                    st.rerun()
             else:
                 st.error("Failed to process images. Please check the CSV file format and try again.")
 
