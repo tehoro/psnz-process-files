@@ -3,6 +3,7 @@
 # Created by Neil Gordon January 2025
 # Modified to include EXIF data extraction
 # Refactored and Optimized March 2025 for Streamlit Cloud
+# Complete, optimized main.py with progress bar, detailed status, and sequence numbering.
 
 import streamlit as st
 import pandas as pd
@@ -20,13 +21,9 @@ from pathlib import Path
 import threading
 import warnings
 
-# Disable PIL DecompressionBombWarning
 warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
-
-# Safer decompression limit (~100 MP)
 Image.MAX_IMAGE_PIXELS = 100_000_000
 
-# App configuration
 APP_CONFIG = {
     "debug": False,
     "thumbnail_size": (810, 810),
@@ -53,7 +50,13 @@ def get_exif_data(img):
         pass
     return exif_data
 
-def pad_id_with_sequence(filename, _, sequence_dict):
+def pad_id_with_sequence(filename, sequence_dict):
+    match = re.match(r"(\d+)(.*)", filename)
+    if match:
+        id_num, rest = match.groups()
+        seq_num = sequence_dict.get(id_num, 0) + 1
+        sequence_dict[id_num] = seq_num
+        return f"{id_num}-{seq_num}{rest}"
     return filename
 
 def setup_directories(temp_dir, limit_size, remove_exif):
@@ -72,6 +75,9 @@ def validate_csv(df):
 
 def fetch_and_process_image(row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict=None):
     filename = re.sub(r'[\\/:*?"<>|]', '_', row['File Name'])
+    if sequence_dict is not None:
+        filename = pad_id_with_sequence(filename, sequence_dict)
+
     filepath = fullsize_dir / filename
     filepath_small = thumbnail_dir / filename
 
@@ -129,6 +135,7 @@ def main():
 
     limit_size = st.checkbox("Limit image size to 3840x2160 pixels", True)
     remove_exif = st.checkbox("Remove EXIF metadata from images", True)
+    add_sequence = st.checkbox("Add sequence # for multiple images per ID", False)
 
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
 
@@ -151,15 +158,19 @@ def main():
                         st.error(error)
                     return
 
+                sequence_dict = {} if add_sequence else None
                 exif_data_list = []
 
-                for start_idx in range(0, len(df), APP_CONFIG["batch_size"]):
-                    batch_df = df.iloc[start_idx:start_idx+APP_CONFIG["batch_size"]]
-                    for _, row in batch_df.iterrows():
-                        result = fetch_and_process_image(row, fullsize_dir, thumbnail_dir, limit_size, remove_exif)
-                        if result:
-                            exif_data_list.append(result)
-                    gc.collect()
+                progress_bar = st.progress(0)
+                status_area = st.empty()
+                total_images = len(df)
+
+                for idx, (_, row) in enumerate(df.iterrows(), 1):
+                    result = fetch_and_process_image(row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict)
+                    if result:
+                        exif_data_list.append(result)
+                        status_area.text(f"Processed {idx}/{total_images}: {result['FileName']}")
+                    progress_bar.progress(idx / total_images)
 
                 write_exif_data(exif_csv_path, exif_data_list)
 
