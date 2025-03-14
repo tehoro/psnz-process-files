@@ -453,16 +453,34 @@ def main() -> None:
                 if batch_results:
                     st.success(f"✅ Processing complete! {len(batch_results)} batch(es) ready for download.")
                     
-                    # Create download buttons for each batch
-                    for batch in batch_results:
-                        st.download_button(
-                            label=(f"Download Batch {batch['batch_num']} "
-                                  f"(Images {batch['start_idx'] + 1}-{batch['end_idx'] + 1})"),
-                            data=batch['zip_bytes'],
-                            file_name=batch['zip_filename'],
-                            mime="application/zip",
-                            key=f"download_batch_{batch['batch_num']}"
-                        )
+                    # Display all batches in a container to keep them persistent
+                    download_container = st.container()
+                    with download_container:
+                        st.subheader("Download Processed Batches")
+                        st.write("Each batch can be downloaded independently. All download buttons will remain available.")
+                        
+                        # Create columns for download buttons (2 buttons per row)
+                        cols_per_row = 2
+                        for i in range(0, len(batch_results), cols_per_row):
+                            cols = st.columns(cols_per_row)
+                            
+                            # Add buttons to columns
+                            for j in range(cols_per_row):
+                                if i + j < len(batch_results):
+                                    batch = batch_results[i + j]
+                                    with cols[j]:
+                                        st.download_button(
+                                            label=(f"Batch {batch['batch_num']} "
+                                                  f"(Images {batch['start_idx'] + 1}-{batch['end_idx'] + 1})"),
+                                            data=batch['zip_bytes'],
+                                            file_name=batch['zip_filename'],
+                                            mime="application/zip",
+                                            key=f"download_batch_{batch['batch_num']}",
+                                            use_container_width=True
+                                        )
+                        
+                        # Add a note about downloading all batches
+                        st.info("📋 Remember to download all batches to get your complete processed dataset.")
                 else:
                     st.error("Failed to process images. Please check the CSV file format and try again.")
 
