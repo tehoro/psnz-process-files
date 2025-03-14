@@ -1,3 +1,11 @@
+
+# Created by Neil Gordon January 2025
+# Modified to include EXIF data extraction
+# Refactored and Optimized March 2025 for Streamlit Cloud
+# Complete, optimized main.py with progress bar, detailed status, and sequence numbering.
+
+
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -9,9 +17,9 @@ import tempfile
 import shutil
 import re
 import gc
-import psutil
 import csv
 from pathlib import Path
+
 from typing import Dict, List, Optional, Tuple, Any
 import math
 import warnings
@@ -19,266 +27,121 @@ import warnings
 # Ignore PIL warnings from large image files - should not be a problem
 warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
 
-# App configuration
+
+
 APP_CONFIG = {
-    "debug": False,
+    "debug": True,
     "thumbnail_size": (810, 810),
     "fullsize_limit": (3840, 2160),
+    "absolute_max_size": 7680,
     "jpeg_quality": 100,
     "page_title": "PSNZ Image Entries Processor",
     "batch_size": 150  # Default batch size to avoid memory issues
+
 }
 
-# Setup page configuration
-st.set_page_config(page_title=APP_CONFIG["page_title"])
+st.set_page_config(page_title=APP_CONFIG["page_title"], layout="wide")
 
-def log_memory_usage(message: str) -> None:
-    """Log current memory usage if debug is enabled."""
+@st.cache_resource
+def get_resource_limiter():
+    return threading.Semaphore(1)
+
+def log_debug(message):
     if APP_CONFIG["debug"]:
-        process = psutil.Process()
-        memory_info = process.memory_info()
-        st.write(f"Memory usage at {message}: {memory_info.rss / 1024 / 1024:.2f} MB")
+        st.write(message)
 
-def pad_id_with_sequence(filename: str, id_length: Optional[int] = None, 
-                         sequence_dict: Optional[Dict[str, int]] = None) -> str:
-    """
-    Pad ID with a sequence number for multiple entries from the same ID.
-    
-    Args:
-        filename: Original filename
-        id_length: Length to pad the ID to
-        sequence_dict: Dictionary to track sequence numbers by ID
-        
-    Returns:
-        Modified filename with sequence number if appropriate
-    """
-    match = re.match(r'^(\d+)(.*)$', filename)
-    if match:
-        id_num, rest = match.groups()
-
-        if sequence_dict is None:
-            return f"{id_num}{rest}"
-
-        if id_num not in sequence_dict:
-            sequence_dict[id_num] = 1
-        sequence_num = sequence_dict[id_num]
-        sequence_dict[id_num] += 1
-
-        name_parts = rest.rsplit('.', 1)
-        if len(name_parts) == 2:
-            clean_title = name_parts[0].lstrip('- ')
-            return f"{id_num}-{sequence_num} {clean_title}.{name_parts[1]}"
-        clean_rest = rest.lstrip('- ')
-        return f"{id_num}-{sequence_num} {clean_rest}"
-    return filename
-
-def get_exif_data(img: Image.Image) -> Dict[str, Any]:
-    """
-    Extract EXIF data from image.
-    
-    Args:
-        img: PIL Image object
-        
-    Returns:
-        Dictionary containing extracted EXIF data
-    """
-    exif_data = {
-        'DateTimeCreated': None,
-        'DateTimeOriginal': None,
-        'Width': img.width,
-        'Height': img.height
-    }
-    
+def get_exif_data(img):
+    exif_data = {'Width': img.width, 'Height': img.height, 'DateTimeCreated': None, 'DateTimeOriginal': None}
     try:
-        # Get EXIF data if available
-        exif = {ExifTags.TAGS.get(tag, tag): value 
-                for tag, value in img._getexif().items()} if hasattr(img, '_getexif') and img._getexif() else {}
-        
-        # Date/Time when the image was created/modified
-        if 'DateTime' in exif:
-            exif_data['DateTimeCreated'] = exif['DateTime']
-        
-        # Original Date/Time when the photo was taken
-        if 'DateTimeOriginal' in exif:
-            exif_data['DateTimeOriginal'] = exif['DateTimeOriginal']
-        elif 'DateTimeDigitized' in exif:
-            exif_data['DateTimeOriginal'] = exif['DateTimeDigitized']
+        if hasattr(img, '_getexif') and img._getexif():
+            exif = {ExifTags.TAGS.get(tag, tag): value for tag, value in img._getexif().items()}
+            exif_data['DateTimeCreated'] = exif.get('DateTime', None)
+            exif_data['DateTimeOriginal'] = exif.get('DateTimeOriginal', None)
     except Exception as e:
-        if APP_CONFIG["debug"]:
-            st.write(f"Error extracting EXIF data: {str(e)}")
-    
+        log_debug(f"EXIF extraction error: {e}")
     return exif_data
 
-def setup_directories(temp_dir: Path, limit_size: bool, remove_exif: bool) -> Tuple[Path, Path, Path]:
-    """
-    Create necessary directory structure for image processing.
-    
-    Args:
-        temp_dir: Base temporary directory
-        limit_size: Whether to limit image size
-        remove_exif: Whether to remove EXIF data
-        
-    Returns:
-        Tuple of (fullsize_dir, thumbnail_dir, exif_csv_path)
-    """
-    # Determine folder names based on options
-    fullsize_folder_name = "4K-size" if limit_size else "submitted-size"
-    if remove_exif:
-        fullsize_folder_name += "-exifremoved"
-        thumbnail_folder_name = "thumbnails-exifremoved"
-    else:
-        thumbnail_folder_name = "thumbnails"
+def pad_id_with_sequence(filename, sequence_dict):
+    match = re.match(r"(\d+)(.*)", filename)
+    if match:
+        id_num, rest = match.groups()
+        seq_num = sequence_dict.get(id_num, 0) + 1
+        sequence_dict[id_num] = seq_num
+        return f"{id_num}-{seq_num}{rest}"
+    return filename
 
-    # Create directories
-    fullsize_dir = temp_dir / fullsize_folder_name
-    thumbnail_dir = temp_dir / thumbnail_folder_name
-    fullsize_dir.mkdir(exist_ok=True)
-    thumbnail_dir.mkdir(exist_ok=True)
-    
-    # Path for EXIF data CSV
-    exif_csv_path = temp_dir / "image_metadata.csv"
-    
-    return fullsize_dir, thumbnail_dir, exif_csv_path
+def setup_directories(temp_dir, limit_size, remove_exif):
+    fullsize_dir = temp_dir / ("4K-size" if limit_size else "submitted-size")
+    thumbnail_dir = temp_dir / "thumbnails"
+    fullsize_dir.mkdir(parents=True, exist_ok=True)
+    thumbnail_dir.mkdir(parents=True, exist_ok=True)
+    return fullsize_dir, thumbnail_dir, temp_dir / "metadata.csv"
 
-def validate_csv(df: pd.DataFrame) -> List[str]:
-    """
-    Validate that the CSV has the required columns and format.
-    
-    Args:
-        df: Pandas DataFrame containing CSV data
-        
-    Returns:
-        List of error messages, empty if no errors
-    """
+def validate_csv(df):
     errors = []
-    required_columns = ['File Name', 'Image: URL']
-    
-    for col in required_columns:
+    for col in ['File Name', 'Image: URL']:
         if col not in df.columns:
             errors.append(f"Missing required column: {col}")
-    
-    # Check for empty values in required columns
-    for col in required_columns:
-        if col in df.columns and df[col].isna().any():
-            errors.append(f"Column '{col}' contains empty values")
-            
     return errors
 
-def fetch_and_process_image(
-    row: pd.Series, 
-    fullsize_dir: Path, 
-    thumbnail_dir: Path, 
-    limit_size: bool, 
-    remove_exif: bool, 
-    sequence_dict: Optional[Dict[str, int]] = None
-) -> Optional[Dict[str, Any]]:
-    """
-    Fetch and process a single image.
-    
-    Args:
-        row: Pandas Series containing image data
-        fullsize_dir: Directory for full-size images
-        thumbnail_dir: Directory for thumbnails
-        limit_size: Whether to limit image size
-        remove_exif: Whether to remove EXIF data
-        sequence_dict: Dictionary to track sequence numbers
-        
-    Returns:
-        Dictionary with EXIF data or None if processing failed
-    """
-    # Replace invalid Windows filename characters with underscore
+def fetch_and_process_image(row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict=None):
     original_filename = row['File Name']
-    filename = re.sub(r'[\\/:*?"<>|]', '_', pad_id_with_sequence(original_filename, None, sequence_dict))
+    filename = re.sub(r'[\\/:*?"<>|]', '_', original_filename)
+    if sequence_dict is not None:
+        filename = pad_id_with_sequence(filename, sequence_dict)
+
     filepath = fullsize_dir / filename
     filepath_small = thumbnail_dir / filename
-    
+
     try:
-        # Fetch the image
-        response = requests.get(row['Image: URL'], timeout=10)
-        
-        # Use context manager for better resource management
-        with Image.open(BytesIO(response.content)) as img:
-            log_memory_usage(f"after opening {filename}")
+        log_debug(f"Fetching image: {row['Image: URL']}")
+        response = requests.get(row['Image: URL'], timeout=30, stream=True)
+        image_data = BytesIO(response.content)
+        response.close()
 
-            # Get EXIF data before any modifications
+        with Image.open(image_data) as img:
             exif_data = get_exif_data(img)
-            
-            # Add filename and original filename to exif data
-            exif_info = {
-                'FileName': filename,
-                'OriginalFileName': original_filename,
-                'Width': exif_data['Width'],
-                'Height': exif_data['Height'],
-                'DateTimeCreated': exif_data['DateTimeCreated'],
-                'DateTimeOriginal': exif_data['DateTimeOriginal']
-            }
-
-            # Convert to RGB if needed
-            if img.mode in ('RGBA', 'P'):
-                img = img.convert('RGB')
-
-            # Record original size and resize if needed
             original_size = f"{img.width}x{img.height}"
+            processed_img = img.convert('RGB') if img.mode in ('RGBA', 'P') else img.copy()
+
             resized = False
-            
-            # Create a copy for processing
-            processed_img = img.copy()
-            
-            if limit_size and (processed_img.width > APP_CONFIG["fullsize_limit"][0] or 
-                              processed_img.height > APP_CONFIG["fullsize_limit"][1]):
+            if max(processed_img.size) > APP_CONFIG["absolute_max_size"]:
+                processed_img.thumbnail((APP_CONFIG["absolute_max_size"], APP_CONFIG["absolute_max_size"]))
+                resized = True
+            elif limit_size:
                 processed_img.thumbnail(APP_CONFIG["fullsize_limit"])
                 resized = True
 
-            # Remove EXIF if requested
-            if remove_exif:
-                new_img = Image.new('RGB', processed_img.size)
-                new_img.paste(processed_img)
-                processed_img = new_img
-                log_memory_usage(f"after EXIF removal for {filename}")
-
-            # Save full-size image
             processed_img.save(filepath, "JPEG", quality=APP_CONFIG["jpeg_quality"])
 
-            # Create and save thumbnail
             thumbnail = processed_img.copy()
             thumbnail.thumbnail(APP_CONFIG["thumbnail_size"])
             thumbnail.save(filepath_small, "JPEG")
 
-            # Clean up
-            del thumbnail
-            del processed_img
-            
-            # Return status information
-            return {
-                'exif_info': exif_info,
-                'status': "resized" if resized else "original size",
-                'original_size': original_size
-            }
+            processed_img.close()
+            thumbnail.close()
+            del image_data
 
-    except Exception as e:
-        st.error(f"Error processing image for file {filename}: {str(e)}")
-        if APP_CONFIG["debug"]:
-            import traceback
-            st.error(f"Traceback: {traceback.format_exc()}")
-        return None
-    finally:
-        # Force garbage collection
         gc.collect()
-        log_memory_usage(f"after cleanup for {filename}")
+        return {
+            'FileName': filename,
+            'OriginalFileName': original_filename,
+            'OriginalSize': original_size,
+            'Resized': "Yes" if resized else "No",
+            'DateTimeCreated': exif_data.get('DateTimeCreated', 'N/A'),
+            'DateTimeOriginal': exif_data.get('DateTimeOriginal', 'N/A'),
+            **exif_data
+        }
+    except Exception as e:
+        st.error(f"Error processing image {filename}: {e}")
+        return None
 
-def write_exif_data(exif_csv_path: Path, exif_data_list: List[Dict[str, Any]]) -> None:
-    """
-    Write EXIF data to CSV file.
-    
-    Args:
-        exif_csv_path: Path to CSV file
-        exif_data_list: List of dictionaries containing EXIF data
-    """
+def write_exif_data(exif_csv_path, exif_data_list):
     with open(exif_csv_path, 'w', newline='') as csvfile:
-        fieldnames = ['FileName', 'OriginalFileName', 'Width', 'Height', 
-                     'DateTimeCreated', 'DateTimeOriginal']
+        fieldnames = ['FileName', 'OriginalFileName', 'OriginalSize', 'Resized', 'DateTimeCreated', 'DateTimeOriginal', 'Width', 'Height']
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         writer.writeheader()
+
         for data in exif_data_list:
             writer.writerow(data)
 
@@ -519,6 +382,7 @@ def main() -> None:
                     st.rerun()
             else:
                 st.error("Failed to process images. Please check the CSV file format and try again.")
+
 
 if __name__ == "__main__":
     main()
