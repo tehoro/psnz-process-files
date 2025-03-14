@@ -328,6 +328,10 @@ def process_images_in_batches(csv_file, limit_size=True, remove_exif=True, add_s
     Returns:
         List of dictionaries with batch information
     """
+    # Check if we already have results in session state
+    if 'batch_results' in st.session_state and st.session_state.batch_results:
+        return st.session_state.batch_results
+    
     # Read and validate CSV file
     df = pd.read_csv(csv_file)
     errors = validate_csv(df)
@@ -407,12 +411,22 @@ def process_images_in_batches(csv_file, limit_size=True, remove_exif=True, add_s
         
         # Force garbage collection
         gc.collect()
-        
+    
+    # Store results in session state
+    st.session_state.batch_results = batch_results
     return batch_results
 
 def main() -> None:
     """Main application function."""
     st.title(APP_CONFIG["page_title"])
+
+    # Initialize session state for batch results if it doesn't exist
+    if 'batch_results' not in st.session_state:
+        st.session_state.batch_results = []
+    
+    # Initialize session state for processing flag
+    if 'processing_complete' not in st.session_state:
+        st.session_state.processing_complete = False
 
     st.header("CSV File Upload")
     st.write(
@@ -444,45 +458,63 @@ def main() -> None:
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
     
     if uploaded_file is not None:
-        if st.button("Process Images"):
-            with st.spinner("Processing images in batches..."):
-                batch_results = process_images_in_batches(
-                    uploaded_file, limit_size, remove_exif, add_sequence, batch_size
-                )
+        # Process button
+        process_button = st.button("Process Images")
+        
+        # Check if we should start processing
+        start_processing = process_button or st.session_state.processing_complete
+        
+        if start_processing:
+            # Set the processing flag
+            st.session_state.processing_complete = True
+            
+            # Show processing spinner only if we don't have results yet
+            if not st.session_state.batch_results:
+                with st.spinner("Processing images in batches..."):
+                    batch_results = process_images_in_batches(
+                        uploaded_file, limit_size, remove_exif, add_sequence, batch_size
+                    )
+            else:
+                batch_results = st.session_state.batch_results
+            
+            if batch_results:
+                st.success(f"✅ Processing complete! {len(batch_results)} batch(es) ready for download.")
                 
-                if batch_results:
-                    st.success(f"✅ Processing complete! {len(batch_results)} batch(es) ready for download.")
+                # Display all batches
+                st.subheader("Download Processed Batches")
+                st.write("Each batch can be downloaded independently.")
+                
+                # Create columns for download buttons (2 buttons per row)
+                cols_per_row = 2
+                for i in range(0, len(batch_results), cols_per_row):
+                    cols = st.columns(cols_per_row)
                     
-                    # Display all batches in a container to keep them persistent
-                    download_container = st.container()
-                    with download_container:
-                        st.subheader("Download Processed Batches")
-                        st.write("Each batch can be downloaded independently. All download buttons will remain available.")
-                        
-                        # Create columns for download buttons (2 buttons per row)
-                        cols_per_row = 2
-                        for i in range(0, len(batch_results), cols_per_row):
-                            cols = st.columns(cols_per_row)
-                            
-                            # Add buttons to columns
-                            for j in range(cols_per_row):
-                                if i + j < len(batch_results):
-                                    batch = batch_results[i + j]
-                                    with cols[j]:
-                                        st.download_button(
-                                            label=(f"Batch {batch['batch_num']} "
-                                                  f"(Images {batch['start_idx'] + 1}-{batch['end_idx'] + 1})"),
-                                            data=batch['zip_bytes'],
-                                            file_name=batch['zip_filename'],
-                                            mime="application/zip",
-                                            key=f"download_batch_{batch['batch_num']}",
-                                            use_container_width=True
-                                        )
-                        
-                        # Add a note about downloading all batches
-                        st.info("📋 Remember to download all batches to get your complete processed dataset.")
-                else:
-                    st.error("Failed to process images. Please check the CSV file format and try again.")
+                    # Add buttons to columns
+                    for j in range(cols_per_row):
+                        if i + j < len(batch_results):
+                            batch = batch_results[i + j]
+                            with cols[j]:
+                                # Create download button with unique key that includes batch number
+                                st.download_button(
+                                    label=(f"Batch {batch['batch_num']} "
+                                          f"(Images {batch['start_idx'] + 1}-{batch['end_idx'] + 1})"),
+                                    data=batch['zip_bytes'],
+                                    file_name=batch['zip_filename'],
+                                    mime="application/zip",
+                                    key=f"download_batch_{batch['batch_num']}",
+                                    use_container_width=True
+                                )
+                
+                # Add a note about downloading all batches
+                st.info("📋 Remember to download all batches to get your complete processed dataset.")
+                
+                # Add reset button to clear results and start over
+                if st.button("Reset Processing"):
+                    st.session_state.batch_results = []
+                    st.session_state.processing_complete = False
+                    st.experimental_rerun()
+            else:
+                st.error("Failed to process images. Please check the CSV file format and try again.")
 
 if __name__ == "__main__":
     main()
