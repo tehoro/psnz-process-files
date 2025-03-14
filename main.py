@@ -7,6 +7,8 @@
 
 # Complete, optimized main.py with correct metadata columns in EXIF CSV.
 
+# Complete, optimized main.py with EXIF date handling fixes.
+
 import streamlit as st
 import pandas as pd
 import requests
@@ -27,14 +29,14 @@ warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
 Image.MAX_IMAGE_PIXELS = 100_000_000
 
 APP_CONFIG = {
-    "debug": False,
+    "debug": True,
     "thumbnail_size": (810, 810),
     "fullsize_limit": (3840, 2160),
     "absolute_max_size": 7680,
     "jpeg_quality": 100,
     "page_title": "PSNZ Image Entries Processor",
     "batch_size": 3,
-    "zip_batch_size": 150,  # Number of images per zip file
+    "zip_batch_size": 150,
 }
 
 st.set_page_config(page_title=APP_CONFIG["page_title"], layout="wide")
@@ -43,15 +45,19 @@ st.set_page_config(page_title=APP_CONFIG["page_title"], layout="wide")
 def get_resource_limiter():
     return threading.Semaphore(1)
 
+def log_debug(message):
+    if APP_CONFIG["debug"]:
+        st.write(message)
+
 def get_exif_data(img):
-    exif_data = {'Width': img.width, 'Height': img.height, 'DateTimeCreated': None}
+    exif_data = {'Width': img.width, 'Height': img.height, 'DateTimeCreated': None, 'DateTimeOriginal': None}
     try:
-        if hasattr(img, '_getexif'):
+        if hasattr(img, '_getexif') and img._getexif():
             exif = {ExifTags.TAGS.get(tag, tag): value for tag, value in img._getexif().items()}
             exif_data['DateTimeCreated'] = exif.get('DateTime', None)
             exif_data['DateTimeOriginal'] = exif.get('DateTimeOriginal', None)
-    except:
-        pass
+    except Exception as e:
+        log_debug(f"EXIF extraction error: {e}")
     return exif_data
 
 def pad_id_with_sequence(filename, sequence_dict):
@@ -87,6 +93,7 @@ def fetch_and_process_image(row, fullsize_dir, thumbnail_dir, limit_size, remove
     filepath_small = thumbnail_dir / filename
 
     try:
+        log_debug(f"Fetching image: {row['Image: URL']}")
         response = requests.get(row['Image: URL'], timeout=30, stream=True)
         image_data = BytesIO(response.content)
         response.close()
@@ -120,8 +127,8 @@ def fetch_and_process_image(row, fullsize_dir, thumbnail_dir, limit_size, remove
             'OriginalFileName': original_filename,
             'OriginalSize': original_size,
             'Resized': "Yes" if resized else "No",
-            'DateTimeCreated': exif_data['DateTimeCreated'],
-            'DateTimeOriginal': exif_data['DateTimeOriginal'],
+            'DateTimeCreated': exif_data.get('DateTimeCreated', 'N/A'),
+            'DateTimeOriginal': exif_data.get('DateTimeOriginal', 'N/A'),
             **exif_data
         }
     except Exception as e:
@@ -161,14 +168,22 @@ def main():
                     return
 
                 sequence_dict = {} if add_sequence else None
+                total_images = len(df)
+                progress_bar = st.progress(0)
+                status_area = st.empty()
+                status_messages = []
+
                 temp_dir = Path(tempfile.mkdtemp())
                 fullsize_dir, thumbnail_dir, exif_csv_path = setup_directories(temp_dir, limit_size, remove_exif)
                 exif_data_list = []
 
-                for _, row in df.iterrows():
+                for idx, (_, row) in enumerate(df.iterrows(), 1):
                     result = fetch_and_process_image(row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict)
                     if result:
                         exif_data_list.append(result)
+                        status_messages.append(f"Processed {idx}/{total_images}: {result['FileName']} (Original: {result['OriginalSize']}, Resized: {result['Resized']})")
+                        status_area.text("\n".join(status_messages[-10:]))
+                    progress_bar.progress(idx / total_images)
 
                 write_exif_data(exif_csv_path, exif_data_list)
                 st.success("Processing complete! EXIF metadata saved.")
