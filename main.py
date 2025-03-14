@@ -48,8 +48,15 @@ if 'total_batches' not in st.session_state:
 if 'sequence_dict' not in st.session_state:
     st.session_state.sequence_dict = {}
 
-def log_memory_usage(message: str) -> None:
-    """Log current memory usage if debug is enabled and warn if approaching limits."""
+def log_memory_usage(message: str) -> Optional[float]:
+    """Log current memory usage if debug is enabled and warn if approaching limits.
+    
+    Args:
+        message: Descriptive message for the log entry
+        
+    Returns:
+        Memory usage in MB or None if debug is disabled
+    """
     if APP_CONFIG["debug"]:
         process = psutil.Process()
         memory_info = process.memory_info()
@@ -66,6 +73,9 @@ def log_memory_usage(message: str) -> None:
         
         # Return memory so we can react to it in code
         return memory_mb
+    
+    # Return None if debug is disabled
+    return None
 
 def pad_id_with_sequence(filename: str, id_length: Optional[int] = None, 
                          sequence_dict: Optional[Dict[str, int]] = None) -> str:
@@ -272,7 +282,8 @@ def fetch_and_process_image(
                 
                 # Check if memory is getting high after loading large image
                 memory_usage = log_memory_usage(f"after copying {filename}")
-                if memory_usage > APP_CONFIG["memory_limit_mb"] * 0.9:
+                # Only check memory if debug is enabled and memory_usage is not None
+                if memory_usage is not None and memory_usage > APP_CONFIG["memory_limit_mb"] * 0.9:
                     # Try emergency garbage collection
                     gc.collect()
                 
