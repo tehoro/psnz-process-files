@@ -14,6 +14,10 @@ import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 import math
+import warnings
+
+# Ignore PIL warnings from large image files - should not be a problem
+warnings.filterwarnings("ignore", category=Image.DecompressionBombWarning)
 
 # App configuration
 APP_CONFIG = {
