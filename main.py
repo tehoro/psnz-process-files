@@ -47,6 +47,30 @@ if 'total_batches' not in st.session_state:
     st.session_state.total_batches = 0
 if 'sequence_dict' not in st.session_state:
     st.session_state.sequence_dict = {}
+if 'last_uploaded_file' not in st.session_state:
+    st.session_state.last_uploaded_file = None
+
+def force_memory_cleanup():
+    """Force a deep memory cleanup to reclaim memory."""
+    # Clear any large objects in session state
+    if 'csv_data' in st.session_state:
+        st.session_state.csv_data = None
+    
+    # Clear any batch results data if processing is complete
+    if st.session_state.processing_complete and 'batch_results' in st.session_state:
+        st.session_state.batch_results = []
+    
+    # Force garbage collection multiple times to ensure cleanup
+    for _ in range(3):
+        gc.collect()
+    
+    # Log current memory after cleanup
+    if APP_CONFIG["debug"]:
+        process = psutil.Process()
+        memory_mb = process.memory_info().rss / 1024 / 1024
+        st.write(f"Memory after cleanup: {memory_mb:.2f} MB")
+        
+    return
 
 def log_memory_usage(message: str) -> Optional[float]:
     """Log current memory usage if debug is enabled and warn if approaching limits.
@@ -456,6 +480,9 @@ def process_single_batch(batch_index, df, csv_filename, limit_size, remove_exif,
     end_idx = min(start_idx + batch_size, total_images)
     batch_df = df.iloc[start_idx:end_idx]
     
+    # Create a variable to track if a memory warning was triggered
+    memory_warning_triggered = False
+    
     try:
         # Create a new temporary directory for this batch
         temp_dir = Path(tempfile.mkdtemp())
@@ -474,11 +501,90 @@ def process_single_batch(batch_index, df, csv_filename, limit_size, remove_exif,
         status_messages = st.empty()
 
         # Log memory
-        log_memory_usage(f"before processing batch {batch_index + 1}")
+        memory_usage = log_memory_usage(f"before processing batch {batch_index + 1}")
+        
+        # Check if memory is already high
+        if memory_usage and memory_usage > APP_CONFIG["memory_limit_mb"] * 0.7:
+            status_area.warning("⚠️ Memory usage is already high. Consider downloading previous batches.")
+            memory_warning_triggered = True
 
         # Process each image in this batch
         for i, (index, row) in enumerate(batch_df.iterrows()):
             current_image_idx = start_idx + i + 1
+            status_area.info(f"Processing image {current_image_idx}/{total_images} in batch {batch_index + 1}")
+            
+            # Check memory periodically
+            if i > 0 and i % 10 == 0 and not memory_warning_triggered:
+                memory_check = log_memory_usage(f"during batch {batch_index + 1}, image {i}")
+                if memory_check and memory_check > APP_CONFIG["memory_limit_mb"] * 0.8:
+                    status_area.warning(f"⚠️ Memory usage is high ({memory_check:.2f}MB). Consider reducing batch size next time.")
+                    memory_warning_triggered = True
+            
+            result = fetch_and_process_image(
+                row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict
+            )
+            
+            if result:
+                batch_exif_data.append(result['exif_info'])
+                status_messages.write(f"Processed {current_image_idx}/{total_images}: {result['exif_info']['FileName']} "
+                        f"({result['original_size']}, {result['status']})")
+            
+            # Update progress
+            progress_bar.progress((i + 1) / len(batch_df))
+            
+            # Periodically force garbage collection for large batches
+            if i > 0 and i % 25 == 0:
+                gc.collect()
+                log_memory_usage(f"after {i} images in batch {batch_index + 1}")
+
+        status_area.info(f"Writing EXIF data to CSV for batch {batch_index + 1}")
+        # Write EXIF data to CSV for this batch
+        write_exif_data(exif_csv_path, batch_exif_data)
+        
+        status_area.info(f"Creating zip file for batch {batch_index + 1} (this may take a while)...")
+        log_memory_usage(f"before creating zip for batch {batch_index + 1}")
+        
+        # Create zip file for this batch
+        batch_zip_filename, batch_zip_bytes = create_zip(temp_dir, csv_filename, batch_index + 1)
+        
+        # Create batch result
+        batch_result = {
+            'batch_num': batch_index + 1,
+            'zip_filename': batch_zip_filename,
+            'zip_bytes': batch_zip_bytes,
+            'num_images': len(batch_df),
+            'start_idx': start_idx,
+            'end_idx': end_idx - 1
+        }
+        
+        status_area.info(f"Cleaning up temporary files for batch {batch_index + 1}")
+        # Clean up the temp directory
+        shutil.rmtree(temp_dir)
+        
+        # Force garbage collection after processing a batch
+        gc.collect()
+        log_memory_usage(f"after batch {batch_index + 1} complete")
+        
+        status_area.success(f"Batch {batch_index + 1} completed successfully!")
+        return batch_result
+        
+    except Exception as e:
+        status_area.error(f"Error processing batch {batch_index + 1}")
+        st.error(f"Error processing batch {batch_index + 1}: {str(e)}")
+        if APP_CONFIG["debug"]:
+            import traceback
+            st.error(f"Traceback: {traceback.format_exc()}")
+        
+        # Try to clean up resources on error
+        try:
+            if 'temp_dir' in locals():
+                shutil.rmtree(temp_dir)
+        except:
+            pass
+        
+        # Force garbage collection on error
+        gc.collect()
+        return None + i + 1
             status_area.info(f"Processing image {current_image_idx}/{total_images} in batch {batch_index + 1}")
             
             result = fetch_and_process_image(
