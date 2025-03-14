@@ -603,15 +603,29 @@ def continue_processing():
                     # Add result to the list
                     st.session_state.batch_results.append(batch_result)
                     
+                    # Display success message
+                    st.success(f"✅ Batch {current_batch + 1} processed successfully!")
+                    
+                    # Create a download button for the just-processed batch
+                    download_container = st.container()
+                    with download_container:
+                        st.write("### Download Current Batch")
+                        st.download_button(
+                            label=f"Download Batch {batch_result['batch_num']} (Images {batch_result['start_idx'] + 1}-{batch_result['end_idx'] + 1})",
+                            data=batch_result['zip_bytes'],
+                            file_name=batch_result['zip_filename'],
+                            mime="application/zip",
+                            key=f"download_latest_batch_{batch_result['batch_num']}",
+                            use_container_width=True
+                        )
+                        st.info("👆 Download this batch before continuing to free up memory")
+                    
                     # Increment the current batch
                     st.session_state.current_batch += 1
                     
                     # Check if all batches are processed
                     if st.session_state.current_batch >= st.session_state.total_batches:
                         st.session_state.processing_complete = True
-                    
-                    # Display success message
-                    st.success(f"✅ Batch {current_batch + 1} processed successfully!")
                 else:
                     # Display error message if batch processing failed
                     st.error(f"❌ Batch {current_batch + 1} processing failed. See error details above.")
@@ -640,6 +654,19 @@ def continue_processing():
         
         # Force garbage collection after batch processing
         gc.collect()
+        
+        # Add a continue button directly in this function
+        continue_container = st.container()
+        with continue_container:
+            st.write("### Continue to next batch?")
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Process Next Batch", key="continue_next_batch", use_container_width=True):
+                    st.rerun()
+            with col2:
+                if st.button("Stop Processing", key="stop_processing_button", use_container_width=True):
+                    st.session_state.processing_complete = True
+                    st.rerun()
 
 def main() -> None:
     """Main application function."""
