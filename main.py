@@ -1,7 +1,3 @@
-# Created by Neil Gordon January 2025
-# Modified to include EXIF data extraction
-# Refactored March 2025
-
 import streamlit as st
 import pandas as pd
 import requests
@@ -17,6 +13,7 @@ import psutil
 import csv
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
+import math
 
 # App configuration
 APP_CONFIG = {
@@ -24,7 +21,8 @@ APP_CONFIG = {
     "thumbnail_size": (810, 810),
     "fullsize_limit": (3840, 2160),
     "jpeg_quality": 100,
-    "page_title": "PSNZ Image Entries Processor"
+    "page_title": "PSNZ Image Entries Processor",
+    "batch_size": 150  # Default batch size to avoid memory issues
 }
 
 # Setup page configuration
@@ -280,90 +278,24 @@ def write_exif_data(exif_csv_path: Path, exif_data_list: List[Dict[str, Any]]) -
         for data in exif_data_list:
             writer.writerow(data)
 
-def process_images(csv_file, limit_size=True, remove_exif=True, add_sequence=False) -> Optional[Path]:
-    """
-    Process all images from CSV file.
-    
-    Args:
-        csv_file: CSV file with image data
-        limit_size: Whether to limit image size
-        remove_exif: Whether to remove EXIF data
-        add_sequence: Whether to add sequence numbers
-        
-    Returns:
-        Path to temporary directory with processed images or None if processing failed
-    """
-    # Create temporary directory
-    temp_dir = Path(tempfile.mkdtemp())
-    
-    # Set up directory structure
-    fullsize_dir, thumbnail_dir, exif_csv_path = setup_directories(temp_dir, limit_size, remove_exif)
-    
-    # Initialize EXIF data list
-    exif_data_list = []
-
-    try:
-        if APP_CONFIG["debug"]:
-            st.write("Reading CSV file...")
-        
-        # Read CSV file
-        df = pd.read_csv(csv_file)
-        log_memory_usage("after reading CSV")
-
-        # Validate CSV
-        errors = validate_csv(df)
-        if errors:
-            for error in errors:
-                st.error(error)
-            return None
-
-        # Initialize sequence dictionary if needed
-        sequence_dict = {} if add_sequence else None
-
-        # Set up progress tracking
-        total_images = len(df)
-        st.write(f"Total images to process: {total_images}")
-        progress_bar = st.progress(0)
-
-        # Process each image
-        for index, row in df.iterrows():
-            result = fetch_and_process_image(
-                row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict
-            )
-            
-            if result:
-                exif_data_list.append(result['exif_info'])
-                st.write(f"Processed {index + 1}/{total_images}: {result['exif_info']['FileName']} "
-                         f"({result['original_size']}, {result['status']})")
-            
-            # Update progress
-            progress_bar.progress((index + 1) / total_images)
-
-        # Write EXIF data to CSV
-        write_exif_data(exif_csv_path, exif_data_list)
-
-    except Exception as e:
-        st.error(f"Error processing CSV file: {str(e)}")
-        if APP_CONFIG["debug"]:
-            import traceback
-            st.error(f"Traceback: {traceback.format_exc()}")
-        return None
-
-    return temp_dir
-
-def create_zip(directory: Path, csv_filename: str) -> Tuple[str, bytes]:
+def create_zip(directory: Path, csv_filename: str, batch_num: int = None) -> Tuple[str, bytes]:
     """
     Create a zip file with all processed files and return its content as bytes.
     
     Args:
         directory: Directory containing files to zip
         csv_filename: Original CSV filename
+        batch_num: Batch number (optional)
         
     Returns:
         Tuple of (zip_filename, zip_content_bytes)
     """
-    # Create a zip filename based on the input CSV
-    zip_filename = f"{Path(csv_filename).stem}_images.zip"
+    # Create a zip filename based on the input CSV and batch number
+    base_name = Path(csv_filename).stem
+    zip_filename = f"{base_name}_images"
+    if batch_num is not None:
+        zip_filename += f"_batch{batch_num}"
+    zip_filename += ".zip"
     
     # Use BytesIO to create the zip in memory instead of writing to disk
     zip_buffer = BytesIO()
@@ -382,58 +314,157 @@ def create_zip(directory: Path, csv_filename: str) -> Tuple[str, bytes]:
     # Return filename and content as bytes
     return zip_filename, zip_buffer.getvalue()
 
-# This function is no longer needed since we're not saving zip files to disk
-# def cleanup_old_zips() -> None:
-#     """Remove previous zip files from temp directory."""
-#     temp_dir = Path(tempfile.gettempdir())
-#     for file in temp_dir.glob('*_images.zip'):
-#         file.unlink()
+def process_images_in_batches(csv_file, limit_size=True, remove_exif=True, add_sequence=False, batch_size=150) -> List[Dict]:
+    """
+    Process images from CSV file in batches to manage memory usage.
+    
+    Args:
+        csv_file: CSV file with image data
+        limit_size: Whether to limit image size
+        remove_exif: Whether to remove EXIF data
+        add_sequence: Whether to add sequence numbers
+        batch_size: Number of images to process in each batch
+        
+    Returns:
+        List of dictionaries with batch information
+    """
+    # Read and validate CSV file
+    df = pd.read_csv(csv_file)
+    errors = validate_csv(df)
+    if errors:
+        for error in errors:
+            st.error(error)
+        return []
+    
+    # Initialize sequence dictionary if needed
+    sequence_dict = {} if add_sequence else None
+
+    # Calculate number of batches
+    total_images = len(df)
+    num_batches = math.ceil(total_images / batch_size)
+    st.write(f"Processing {total_images} images in {num_batches} batches (max {batch_size} images per batch)")
+    
+    batch_results = []
+    
+    # Process each batch
+    for batch_index in range(num_batches):
+        # Create a new temporary directory for this batch
+        temp_dir = Path(tempfile.mkdtemp())
+        
+        # Set up directory structure
+        fullsize_dir, thumbnail_dir, exif_csv_path = setup_directories(temp_dir, limit_size, remove_exif)
+        
+        # Calculate start and end indices for this batch
+        start_idx = batch_index * batch_size
+        end_idx = min(start_idx + batch_size, total_images)
+        batch_df = df.iloc[start_idx:end_idx]
+        
+        batch_exif_data = []
+        
+        # Set up progress tracking for this batch
+        st.write(f"\nProcessing Batch {batch_index + 1}/{num_batches} (images {start_idx + 1} to {end_idx})")
+        progress_bar = st.progress(0)
+
+        # Process each image in this batch
+        for i, (index, row) in enumerate(batch_df.iterrows()):
+            result = fetch_and_process_image(
+                row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict
+            )
+            
+            if result:
+                batch_exif_data.append(result['exif_info'])
+                st.write(f"Processed {start_idx + i + 1}/{total_images}: {result['exif_info']['FileName']} "
+                         f"({result['original_size']}, {result['status']})")
+            
+            # Update progress
+            progress_bar.progress((i + 1) / len(batch_df))
+
+        # Write EXIF data to CSV for this batch
+        write_exif_data(exif_csv_path, batch_exif_data)
+        
+        # Create zip file for this batch
+        try:
+            batch_zip_filename, batch_zip_bytes = create_zip(temp_dir, csv_file.name, batch_index + 1)
+            
+            # Add batch result
+            batch_results.append({
+                'batch_num': batch_index + 1,
+                'zip_filename': batch_zip_filename,
+                'zip_bytes': batch_zip_bytes,
+                'num_images': len(batch_df),
+                'start_idx': start_idx,
+                'end_idx': end_idx - 1
+            })
+            
+            # Clean up the temp directory
+            shutil.rmtree(temp_dir)
+            
+        except Exception as e:
+            st.error(f"Error creating zip for batch {batch_index + 1}: {str(e)}")
+            if APP_CONFIG["debug"]:
+                import traceback
+                st.error(f"Traceback: {traceback.format_exc()}")
+        
+        # Force garbage collection
+        gc.collect()
+        
+    return batch_results
 
 def main() -> None:
     """Main application function."""
     st.title(APP_CONFIG["page_title"])
 
-    # We no longer need to clean up zip files since we're not saving them to disk
-    # cleanup_old_zips()
-
     st.header("CSV File Upload")
     st.write(
         "Please upload the CSV file with columns 'File Name' and 'Image: URL'. "
         "All images will be fetched and padded with leading zeros. "
-        "We'll create thumbnails and provide a zip for download. "
+        "We'll create thumbnails and provide zip files for download. "
         "EXIF data (dimensions, creation date, original capture date) will be extracted "
-        "and included in a separate CSV file in the zip."
+        "and included in a separate CSV file in each zip."
     )
 
     # User options
     limit_size = st.checkbox("Limit image size to 3840x2160 pixels", value=True)
     remove_exif = st.checkbox("Remove EXIF metadata from images", value=True)
     add_sequence = st.checkbox("Add sequence # after ID for multiple images from the same ID", value=False)
+    
+    # Batch size option
+    col1, col2 = st.columns([3, 1])
+    with col1:
+        batch_size = st.slider("Batch size (max images per download)", 
+                             min_value=10, max_value=500, value=APP_CONFIG["batch_size"], step=10)
+    with col2:
+        st.write("")
+        st.write("")
+        if st.button("Reset to Default"):
+            batch_size = APP_CONFIG["batch_size"]
+            st.experimental_rerun()
 
     # File uploader
     uploaded_file = st.file_uploader("Choose a CSV file", type="csv")
     
     if uploaded_file is not None:
         if st.button("Process Images"):
-            with st.spinner("Processing images..."):
-                temp_dir = process_images(uploaded_file, limit_size, remove_exif, add_sequence)
+            with st.spinner("Processing images in batches..."):
+                batch_results = process_images_in_batches(
+                    uploaded_file, limit_size, remove_exif, add_sequence, batch_size
+                )
                 
-                if temp_dir:
-                    # Create zip file in memory
-                    zip_filename, zip_bytes = create_zip(temp_dir, uploaded_file.name)
+                if batch_results:
+                    st.success(f"✅ Processing complete! {len(batch_results)} batch(es) ready for download.")
                     
-                    # Clean up the temp directory
-                    shutil.rmtree(temp_dir)
-
-                    # Provide download button
-                    st.download_button(
-                        label="Download Processed Images (Full-size, Thumbnails, and EXIF Data CSV)",
-                        data=zip_bytes,
-                        file_name=zip_filename,
-                        mime="application/zip"
-                    )
+                    # Create download buttons for each batch
+                    for batch in batch_results:
+                        st.download_button(
+                            label=(f"Download Batch {batch['batch_num']} "
+                                  f"(Images {batch['start_idx'] + 1}-{batch['end_idx'] + 1})"),
+                            data=batch['zip_bytes'],
+                            file_name=batch['zip_filename'],
+                            mime="application/zip",
+                            key=f"download_batch_{batch['batch_num']}"
+                        )
                 else:
-                    st.error("Failed to process images. Please check the CSV file format.")
+                    st.error("Failed to process images. Please check the CSV file format and try again.")
 
 if __name__ == "__main__":
     main()
