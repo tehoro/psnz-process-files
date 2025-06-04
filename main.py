@@ -237,7 +237,12 @@ def fetch_and_process_image(
                 log_memory_usage(f"after EXIF removal for {filename}")
 
             # Save full-size image
-            processed_img.save(filepath, "JPEG", quality=APP_CONFIG["jpeg_quality"])
+            save_kwargs = {"format": "JPEG", "quality": APP_CONFIG["jpeg_quality"]}
+            if not remove_exif:
+                exif_bytes = img.info.get("exif")
+                if exif_bytes:
+                    save_kwargs["exif"] = exif_bytes
+            processed_img.save(filepath, **save_kwargs)
 
             # Create and save thumbnail
             thumbnail = processed_img.copy()
