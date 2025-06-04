@@ -39,7 +39,7 @@ def log_memory_usage(message: str) -> None:
         memory_info = process.memory_info()
         st.write(f"Memory usage at {message}: {memory_info.rss / 1024 / 1024:.2f} MB")
 
-def pad_id_with_sequence(filename: str, id_length: Optional[int] = None, 
+def pad_id_with_sequence(filename: str, id_length: Optional[int] = None,
                          sequence_dict: Optional[Dict[str, int]] = None) -> str:
     """
     Pad ID with a sequence number for multiple entries from the same ID.
@@ -55,6 +55,10 @@ def pad_id_with_sequence(filename: str, id_length: Optional[int] = None,
     match = re.match(r'^(\d+)(.*)$', filename)
     if match:
         id_num, rest = match.groups()
+
+        # Apply zero padding when id_length is provided
+        if id_length:
+            id_num = id_num.zfill(id_length)
 
         if sequence_dict is None:
             return f"{id_num}{rest}"
@@ -169,8 +173,9 @@ def fetch_and_process_image(
     fullsize_dir: Path, 
     thumbnail_dir: Path, 
     limit_size: bool, 
-    remove_exif: bool, 
-    sequence_dict: Optional[Dict[str, int]] = None
+    remove_exif: bool,
+    sequence_dict: Optional[Dict[str, int]] = None,
+    id_length: Optional[int] = None
 ) -> Optional[Dict[str, Any]]:
     """
     Fetch and process a single image.
@@ -182,13 +187,15 @@ def fetch_and_process_image(
         limit_size: Whether to limit image size
         remove_exif: Whether to remove EXIF data
         sequence_dict: Dictionary to track sequence numbers
+        id_length: Length to pad the numeric ID
         
     Returns:
         Dictionary with EXIF data or None if processing failed
     """
     # Replace invalid Windows filename characters with underscore
     original_filename = row['File Name']
-    filename = re.sub(r'[\\/:*?"<>|]', '_', pad_id_with_sequence(original_filename, None, sequence_dict))
+    filename = re.sub(r'[\\/:*?"<>|]', '_',
+                      pad_id_with_sequence(original_filename, id_length, sequence_dict))
     filepath = fullsize_dir / filename
     filepath_small = thumbnail_dir / filename
     
@@ -352,6 +359,10 @@ def process_images_in_batches(csv_file, limit_size=True, remove_exif=True, add_s
     # Initialize sequence dictionary if needed
     sequence_dict = {} if add_sequence else None
 
+    # Determine padding length based on longest numeric ID
+    id_lengths = df['File Name'].astype(str).str.extract(r'^(\d+)')[0].dropna().str.len()
+    id_length = int(id_lengths.max()) if not id_lengths.empty else None
+
     # Calculate number of batches
     total_images = len(df)
     num_batches = math.ceil(total_images / batch_size)
@@ -381,7 +392,13 @@ def process_images_in_batches(csv_file, limit_size=True, remove_exif=True, add_s
         # Process each image in this batch
         for i, (index, row) in enumerate(batch_df.iterrows()):
             result = fetch_and_process_image(
-                row, fullsize_dir, thumbnail_dir, limit_size, remove_exif, sequence_dict
+                row,
+                fullsize_dir,
+                thumbnail_dir,
+                limit_size,
+                remove_exif,
+                sequence_dict,
+                id_length,
             )
             
             if result:
